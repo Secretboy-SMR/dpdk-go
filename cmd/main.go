@@ -7,9 +7,9 @@ import (
 	"syscall"
 	"time"
 
-	"dpdk-go/dpdk"
-	"dpdk-go/engine"
-	"dpdk-go/protocol/kcp"
+	"github.com/FlourishingWorld/dpdk-go/dpdk"
+	"github.com/FlourishingWorld/dpdk-go/engine"
+	"github.com/FlourishingWorld/dpdk-go/protocol/kcp"
 )
 
 func main() {

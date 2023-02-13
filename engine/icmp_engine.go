@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
 type IcmpEngine struct {

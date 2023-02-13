@@ -3,8 +3,8 @@ package engine
 import (
 	"fmt"
 
-	"dpdk-go/protocol"
-	"dpdk-go/protocol/kcp"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/protocol/kcp"
 )
 
 type UdpEngine struct {

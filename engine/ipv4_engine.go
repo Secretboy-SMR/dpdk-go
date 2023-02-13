@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"fmt"
 
-	"dpdk-go/dpdk"
-	"dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/dpdk"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
 type Ipv4Engine struct {

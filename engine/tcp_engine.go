@@ -3,7 +3,7 @@ package engine
 import (
 	"fmt"
 
-	"dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
 type TcpEngine struct {

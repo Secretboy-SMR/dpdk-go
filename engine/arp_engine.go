@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"dpdk-go/dpdk"
-	"dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/dpdk"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
 type ArpEngine struct {

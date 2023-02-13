@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"dpdk-go/dpdk"
-	"dpdk-go/protocol"
+	"github.com/FlourishingWorld/dpdk-go/dpdk"
+	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
 var BROADCAST_MAC_ADDR = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
