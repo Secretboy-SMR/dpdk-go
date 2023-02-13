@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/binary"
 	"errors"
 )
 
@@ -33,6 +34,15 @@ func ParseIcmpPkt(pkt []byte) (payload []byte, icmpType uint8, icmpId []byte, ic
 	}
 	// 类型
 	icmpType = pkt[0]
+	// 代码
+	if (pkt[0] != 0x08 && pkt[0] != 0x00) || pkt[1] != 0x00 {
+		return nil, ICMP_UNKNOWN, nil, nil, errors.New("not support type of icmp packet")
+	}
+	// 检查校验和
+	sum := GetCheckSum(pkt)
+	if binary.BigEndian.Uint16(sum) != 0 {
+		return nil, ICMP_UNKNOWN, nil, nil, errors.New("check sum error")
+	}
 	// 标识
 	icmpId = pkt[4:6]
 	// 序号
@@ -51,7 +61,7 @@ func BuildIcmpPkt(payload []byte, icmpType uint8, icmpId []byte, icmpSeq []byte)
 	pkt = append(pkt, icmpType)
 	// 代码
 	pkt = append(pkt, 0x00)
-	// 校验和(暂时用0代替)
+	// 校验和(填充零)
 	pkt = append(pkt, 0x00, 0x00)
 	// 标识
 	pkt = append(pkt, icmpId...)
@@ -59,9 +69,9 @@ func BuildIcmpPkt(payload []byte, icmpType uint8, icmpId []byte, icmpSeq []byte)
 	pkt = append(pkt, icmpSeq...)
 	// 数据
 	pkt = append(pkt, payload...)
-	// 校验和
-	sum := getCheckSum(pkt)
-	pkt[2] = sum[1]
-	pkt[3] = sum[0]
+	// 计算校验和
+	sum := GetCheckSum(pkt)
+	pkt[2] = sum[0]
+	pkt[3] = sum[1]
 	return pkt, nil
 }

@@ -53,7 +53,7 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 	// 总长度
 	totalLen := int(binary.BigEndian.Uint16([]byte{pkt[2], pkt[3]}))
 	// 不支持分片
-	if !(pkt[6] == 0x40 || pkt[6] == 0x00) || pkt[7] != 0x00 {
+	if (pkt[6] != 0x40 && pkt[6] != 0x00) || pkt[7] != 0x00 {
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("not support ip frg")
 	}
 	// 协议
@@ -66,6 +66,11 @@ func ParseIpv4Pkt(pkt []byte) (payload []byte, ipHeadProto uint8, srcAddr []byte
 		ipHeadProto = IPH_PROTO_UDP
 	} else {
 		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("unknown ip protocol")
+	}
+	// 检查首部校验和
+	headerSum := GetCheckSum(pkt[0:20])
+	if binary.BigEndian.Uint16(headerSum) != 0 {
+		return nil, IPH_PROTO_UNKNOWN, nil, nil, errors.New("header check sum error")
 	}
 	// 源地址
 	srcAddr = pkt[12:16]
@@ -87,27 +92,27 @@ func BuildIpv4Pkt(payload []byte, ipHeadProto uint8, srcAddr []byte, dstAddr []b
 	// 版本(IPV4)+首部长度(20字节)+服务类型(0x00)
 	pkt = append(pkt, 0x45, 0x00)
 	// 总长度
-	ipPkgLen := uint16(len(payload) + 20)
-	pkt = append(pkt, byte(ipPkgLen>>8), byte(ipPkgLen))
+	ipPktLen := uint16(len(payload) + 20)
+	pkt = append(pkt, byte(ipPktLen>>8), byte(ipPktLen))
 	// 标识
 	iphId++
 	pkt = append(pkt, byte(iphId>>8), byte(iphId))
 	// 标志位+片偏移(不分片)
 	pkt = append(pkt, 0x00, 0x00)
-	// 生存时间(64)
-	pkt = append(pkt, 0x40)
+	// 生存时间(128)
+	pkt = append(pkt, 0x80)
 	// 协议
 	pkt = append(pkt, ipHeadProto)
-	// 首部校验和(暂时用0代替)
+	// 首部校验和(填充零)
 	pkt = append(pkt, 0x00, 0x00)
 	// 源地址
 	pkt = append(pkt, srcAddr...)
 	// 目的地址
 	pkt = append(pkt, dstAddr...)
-	// 计算校验和
-	sum := getCheckSum(pkt)
-	pkt[10] = sum[1]
-	pkt[11] = sum[0]
+	// 计算首部校验和
+	headerSum := GetCheckSum(pkt)
+	pkt[10] = headerSum[0]
+	pkt[11] = headerSum[1]
 	// 上层数据
 	pkt = append(pkt, payload...)
 	return pkt, nil

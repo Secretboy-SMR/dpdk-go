@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <arpa/inet.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -19,26 +20,27 @@
 #include <rte_bus_pci.h>
 #include <rte_kni.h>
 
+const char *VERSION = "2.0.0";
+
 //#define DEBUG
-//#define SINGLE_CORE
-//#define IDEL_SLEEP
-//#define KNI_BYPASS_TCP_UDP
-char *VERSION = "1.0.0";
+#define SINGLE_CORE
+#define IDLE_SLEEP
+#define KNI_BYPASS_TARGET_IP
 
 #define RING_BUFFER_SIZE 134217728
 
 #define KNI_ENET_HEADER_SIZE 14
 #define KNI_ENET_FCS_SIZE 4
-#define KNI_RX_RING_SIZE 2048
+#define KNI_RX_RING_SIZE 1024
 #define KNI_MAX_PACKET_SIZE 2048
 
-#define NUM_MBUFS 524288
-#define MBUF_CACHE_SIZE 512
+#define NUM_MBUFS 8191
+#define MBUF_CACHE_SIZE 250
 #define RX_QUEUE 1
 #define TX_QUEUE 1
-#define RX_RING_SIZE 2048
-#define TX_RING_SIZE 2048
-#define BURST_SIZE 64
+#define RX_RING_SIZE 1024
+#define TX_RING_SIZE 1024
+#define BURST_SIZE 32
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 #define RTE_DEV_NAME_MAX_LEN 512
 
@@ -49,12 +51,13 @@ uint8_t *mem_recv_cur = NULL;
 volatile uint8_t *send_pos_pointer = NULL;
 volatile uint8_t *recv_pos_pointer = NULL;
 
-struct rte_kni *kni;
-
-static volatile bool force_quit = false;
-uint16_t used_port_id = 0;
 static struct rte_eth_conf port_conf_default;
+static struct rte_kni *kni;
+static struct rte_eth_stats old_stats;
 struct rte_mempool *mbuf_pool = NULL;
+volatile bool force_quit = false;
+uint16_t used_port_id = 0;
+uint32_t kni_bypass_ip = 0;
 
 // ==========环状缓冲区 BEGIN==========
 /*
@@ -332,7 +335,7 @@ static int kni_config_mac_address(uint16_t port_id, uint8_t mac_addr[]) {
     return ret;
 }
 
-static int kni_alloc(uint16_t port_id) {
+int kni_alloc(uint16_t port_id) {
     struct rte_kni_conf conf;
     memset(&conf, 0, sizeof(conf));
 
@@ -381,10 +384,8 @@ double cost_time_ms(struct timeval time_begin, struct timeval time_end) {
     return (time_end_us - time_begin_us) / 1000;
 }
 
-struct rte_eth_stats old_stats;
-
 // 统计每秒收发包信息
-static void print_second_stats(void) {
+void print_second_stats(void) {
     struct rte_eth_stats stats;
     rte_eth_stats_get(used_port_id, &stats);
     printf("speed rx:%10"
@@ -407,7 +408,7 @@ static void print_second_stats(void) {
 }
 
 // 统计总共收发包信息
-static void print_total_stats(void) {
+void print_total_stats(void) {
     struct rte_eth_stats stats;
     printf("total statistics for port %u\n", used_port_id);
     rte_eth_stats_get(used_port_id, &stats);
@@ -425,13 +426,13 @@ static void print_total_stats(void) {
 }
 
 // 处理退出信号并终止程序
-static void exit_signal_handler(void) {
+void exit_signal_handler(void) {
     printf("exit signal received, exit...\n");
     force_quit = true;
 }
 
 // 初始化网口 配置收发队列
-static inline int port_init(uint16_t port_id) {
+int port_init(uint16_t port_id) {
     uint8_t nb_ports = rte_eth_dev_count();
     if (port_id < 0 || port_id >= nb_ports) {
         printf("port is not right\n");
@@ -494,15 +495,19 @@ static inline int port_init(uint16_t port_id) {
     return 0;
 }
 
+void lcore_misc_loop(void) {
+    // KNI回调处理
+    rte_kni_handle_request(kni);
+    // 这个太耗时了 改用插入kni内核模块时指定carrier=on参数实现
+//    update_kni_link_status(used_port_id);
+}
+
 int lcore_misc(void *arg) {
     unsigned int lcore_id = rte_lcore_id();
     RTE_LOG(INFO, APP, "lcore_misc run in lcore %u\n", lcore_id);
     struct timeval time_now, time_old;
     while (!force_quit) {
-        // KNI回调处理
-        rte_kni_handle_request(kni);
-        // 这个太耗时了 改用插入kni内核模块时指定carrier=on参数实现
-//        update_kni_link_status(used_port_id);
+        lcore_misc_loop();
         gettimeofday(&time_now, NULL);
         double cost_time = cost_time_ms(time_old, time_now);
         if (cost_time >= 1000.0) {
@@ -512,6 +517,85 @@ int lcore_misc(void *arg) {
     }
     RTE_LOG(INFO, APP, "lcore_misc exit in lcore %u\n", lcore_id);
     return 0;
+}
+
+bool lcore_rx_loop(void) {
+    // 接收多个网卡数据帧
+    struct rte_mbuf *bufs_recv[BURST_SIZE];
+    uint16_t nb_rx = rte_eth_rx_burst(used_port_id, 0, bufs_recv, BURST_SIZE);
+
+#ifdef IDLE_SLEEP
+    // 无包时短暂睡眠节省CPU资源
+    if (unlikely(nb_rx == 0)) {
+        return false;
+    }
+#endif
+
+    // 有网卡接收数据
+    if (likely(nb_rx != 0)) {
+        struct rte_mbuf *bufs_recv_to_kni[BURST_SIZE];
+        uint16_t nb_rx_to_kni = 0;
+        for (int i = 0; i < nb_rx; i++) {
+            uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t * );
+#ifdef DEBUG
+            // 打印网卡接收到的原始数据
+            printf("nic recv, len: %d, data: ", bufs_recv[i]->data_len);
+            for (int j = 0; j < bufs_recv[i]->data_len; j++) {
+                printf("%02x ", pktbuf[j]);
+            }
+            printf("\n\n");
+#endif
+#ifdef KNI_BYPASS_TARGET_IP
+            bool is_kni_data = false;
+            if (unlikely(bufs_recv[i]->data_len < 14)) {
+                printf("error ethernet frm, len < 14\n");
+                continue;
+            }
+            if (likely(pktbuf[12] == 0x08) && likely(pktbuf[13] == 0x00)) {
+                // IP报文
+                if (unlikely(bufs_recv[i]->data_len < 34)) {
+                    printf("error ip pkt, len < 34\n");
+                    continue;
+                }
+                uint32_t src_addr = 0;
+                src_addr += ((uint32_t)(pktbuf[29]) << 24);
+                src_addr += ((uint32_t)(pktbuf[28]) << 16);
+                src_addr += ((uint32_t)(pktbuf[27]) << 8);
+                src_addr += ((uint32_t)(pktbuf[26]) << 0);
+                if (likely(src_addr == kni_bypass_ip)) {
+                    // 环状缓冲区数据发送
+                    uint16_t ring_send_len = bufs_recv[i]->data_len;
+                    write_recv_mem(pktbuf, ring_send_len);
+                    rte_pktmbuf_free(bufs_recv[i]);
+                } else {
+                    is_kni_data = true;
+                }
+            } else {
+                // 非IP报文
+                is_kni_data = true;
+            }
+            if (unlikely(is_kni_data)) {
+                // KNI数据
+                bufs_recv_to_kni[nb_rx_to_kni] = bufs_recv[i];
+                nb_rx_to_kni++;
+            }
+#else
+            // 环状缓冲区数据发送
+                uint16_t ring_send_len = bufs_recv[i]->data_len;
+                write_recv_mem(pktbuf, ring_send_len);
+                rte_pktmbuf_free(bufs_recv[i]);
+#endif
+        }
+        // KNI数据发送
+        uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_recv_to_kni, nb_rx_to_kni);
+        if (unlikely(nb_kni_tx < nb_rx_to_kni)) {
+            // 把没发送成功的mbuf释放掉
+            for (int i = nb_kni_tx; i < nb_rx_to_kni; i++) {
+                rte_pktmbuf_free(bufs_recv_to_kni[i]);
+            }
+        }
+    }
+    return true;
 }
 
 int lcore_rx(void *arg) {
@@ -527,71 +611,7 @@ int lcore_rx(void *arg) {
             gettimeofday(&time_begin, NULL);
         }
 #endif
-        // 接收多个网卡数据帧
-        struct rte_mbuf *bufs_recv[BURST_SIZE];
-        uint16_t nb_rx = rte_eth_rx_burst(used_port_id, 0, bufs_recv, BURST_SIZE);
-
-        // 有网卡接收数据
-        if (likely(nb_rx != 0)) {
-            struct rte_mbuf *bufs_recv_to_kni[BURST_SIZE];
-            uint16_t nb_rx_to_kni = 0;
-            for (int i = 0; i < nb_rx; i++) {
-                uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t * );
-#ifdef DEBUG
-                // 打印网卡接收到的原始数据
-                printf("interface recv, len: %d, data: ", bufs_recv[i]->data_len);
-                for (int j = 0; j < bufs_recv[i]->data_len; j++) {
-                    printf("%02x ", pktbuf[j]);
-                }
-                printf("\n\n");
-#endif
-#ifdef KNI_BYPASS_TCP_UDP
-                bool is_kni_data = false;
-                if (unlikely(bufs_recv[i]->data_len < 14)) {
-                    printf("error ether package\n");
-                    continue;
-                }
-                if (likely(pktbuf[12] == 0x08) && likely(pktbuf[13] == 0x00)) {
-                    // IP报文
-                    if (unlikely(bufs_recv[i]->data_len < 34)) {
-                        printf("error ip package\n");
-                        continue;
-                    }
-                    if (likely(pktbuf[23] == 0x06) || likely(pktbuf[23] == 0x11)) {
-                        // TCP或UDP报文
-                        // 环状缓冲区数据发送
-                        uint16_t ring_send_len = bufs_recv[i]->data_len;
-                        write_recv_mem(pktbuf, ring_send_len);
-                        rte_pktmbuf_free(bufs_recv[i]);
-                    } else {
-                        // 非TCP或UDP报文
-                        is_kni_data = true;
-                    }
-                } else {
-                    // 非IP报文
-                    is_kni_data = true;
-                }
-                if (unlikely(is_kni_data)) {
-                    // KNI数据
-                    bufs_recv_to_kni[nb_rx_to_kni] = bufs_recv[i];
-                    nb_rx_to_kni++;
-                }
-#else
-                // 环状缓冲区数据发送
-                uint16_t ring_send_len = bufs_recv[i]->data_len;
-                write_recv_mem(pktbuf, ring_send_len);
-                rte_pktmbuf_free(bufs_recv[i]);
-#endif
-            }
-            // KNI数据发送
-            uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_recv_to_kni, nb_rx_to_kni);
-            if (unlikely(nb_kni_tx < nb_rx_to_kni)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_kni_tx; i < nb_rx_to_kni; i++) {
-                    rte_pktmbuf_free(bufs_recv_to_kni[i]);
-                }
-            }
-        }
+        lcore_rx_loop();
 #ifdef DEBUG
         if (loop_times % (1000 * 1000 * 10) == 0) {
             gettimeofday(&time_end, NULL);
@@ -603,6 +623,89 @@ int lcore_rx(void *arg) {
 
     RTE_LOG(INFO, APP, "lcore_rx exit in lcore %u\n", lcore_id);
     return 0;
+}
+
+bool lcore_tx_loop(void) {
+    // 环状缓冲区数据接收
+    uint8_t ring_recv_buf[BURST_SIZE][1514];
+    uint16_t ring_recv_buf_len[BURST_SIZE];
+    int ring_recv_size = 0;
+    for (int i = 0; i < BURST_SIZE; i++) {
+        read_send_mem(ring_recv_buf[i], &ring_recv_buf_len[i]);
+        if (unlikely(ring_recv_buf_len[i] == 0)) {
+            break;
+        }
+        ring_recv_size++;
+    }
+
+    // KNI数据接收
+    struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
+    uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
+
+#ifdef IDLE_SLEEP
+    // 无包时短暂睡眠节省CPU资源
+    if (unlikely(ring_recv_size == 0) && unlikely(nb_kni_rx == 0)) {
+        return false;
+    }
+#endif
+
+    // 有环状缓冲区数据
+    if (likely(ring_recv_size > 0)) {
+#ifdef DEBUG
+        // 打印环状缓冲区数据
+        for (int i = 0; i < ring_recv_size; i++) {
+            printf("ring recv, len: %d, data: ", ring_recv_buf_len[i]);
+            for (int j = 0; j < ring_recv_buf_len[i]; j++) {
+                printf("%02x ", ring_recv_buf[i][j]);
+            }
+            printf("\n\n");
+        }
+#endif
+
+        struct rte_mbuf *bufs_send[BURST_SIZE];
+
+        // 数据拷贝
+        for (int i = 0; i < ring_recv_size; i++) {
+            bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
+            uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i],
+                                                                ring_recv_buf_len[i] * sizeof(uint8_t));
+            memcpy(send_data, ring_recv_buf[i], ring_recv_buf_len[i]);
+        }
+
+        // 发送多个网卡数据帧
+        uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_send, ring_recv_size);
+
+        if (unlikely(nb_tx < ring_recv_size)) {
+            // 把没发送成功的mbuf释放掉
+            for (int i = nb_tx; i < ring_recv_size; i++) {
+                rte_pktmbuf_free(bufs_send[i]);
+            }
+        }
+    }
+
+    // 有KNI数据
+    if (likely(nb_kni_rx > 0)) {
+#ifdef DEBUG
+        // 打印KNI数据
+        for (int i = 0; i < nb_kni_rx; i++) {
+            printf("kni recv, len: %d, data: ", bufs_kni_recv[i]->data_len);
+            for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
+                uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t * );
+                printf("%02x ", pktbuf[j]);
+            }
+            printf("\n\n");
+        }
+#endif
+        // 发送多个网卡数据帧
+        uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_kni_recv, nb_kni_rx);
+        if (unlikely(nb_tx < nb_kni_rx)) {
+            // 把没发送成功的mbuf释放掉
+            for (int i = nb_tx; i < nb_kni_rx; i++) {
+                rte_pktmbuf_free(bufs_kni_recv[i]);
+            }
+        }
+    }
+    return true;
 }
 
 int lcore_tx(void *arg) {
@@ -618,78 +721,7 @@ int lcore_tx(void *arg) {
             gettimeofday(&time_begin, NULL);
         }
 #endif
-        // 环状缓冲区数据接收
-        uint8_t ring_recv_buf[BURST_SIZE][1514];
-        uint16_t ring_recv_buf_len[BURST_SIZE];
-        int ring_recv_size = 0;
-        for (int i = 0; i < BURST_SIZE; i++) {
-            read_send_mem(ring_recv_buf[i], &ring_recv_buf_len[i]);
-            if (unlikely(ring_recv_buf_len[i] == 0)) {
-                break;
-            }
-            ring_recv_size++;
-        }
-
-        // KNI数据接收
-        struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
-        uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
-
-        // 有环状缓冲区数据
-        if (likely(ring_recv_size > 0)) {
-#ifdef DEBUG
-            // 打印环状缓冲区数据
-            for (int i = 0; i < ring_recv_size; i++) {
-                printf("ring recv len: %d, data: ", ring_recv_buf_len[i]);
-                for (int j = 0; j < ring_recv_buf_len[i]; j++) {
-                    printf("%02x ", ring_recv_buf[i][j]);
-                }
-                printf("\n\n");
-            }
-#endif
-
-            struct rte_mbuf *bufs_send[BURST_SIZE];
-
-            // 数据拷贝
-            for (int i = 0; i < ring_recv_size; i++) {
-                bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-                uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i],
-                                                                    ring_recv_buf_len[i] * sizeof(uint8_t));
-                memcpy(send_data, ring_recv_buf[i], ring_recv_buf_len[i]);
-            }
-
-            // 发送多个网卡数据帧
-            uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_send, ring_recv_size);
-
-            if (unlikely(nb_tx < ring_recv_size)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_tx; i < ring_recv_size; i++) {
-                    rte_pktmbuf_free(bufs_send[i]);
-                }
-            }
-        }
-
-        // 有KNI数据
-        if (likely(nb_kni_rx > 0)) {
-#ifdef DEBUG
-            // 打印KNI数据
-            for (int i = 0; i < nb_kni_rx; i++) {
-                printf("kni recv len: %d, data: ", bufs_kni_recv[i]->data_len);
-                for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
-                    uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t * );
-                    printf("%02x ", pktbuf[j]);
-                }
-                printf("\n\n");
-            }
-#endif
-            // 发送多个网卡数据帧
-            uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_kni_recv, nb_kni_rx);
-            if (unlikely(nb_tx < nb_kni_rx)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_tx; i < nb_kni_rx; i++) {
-                    rte_pktmbuf_free(bufs_kni_recv[i]);
-                }
-            }
-        }
+        lcore_tx_loop();
 #ifdef DEBUG
         if (loop_times % (1000 * 1000 * 10) == 0) {
             gettimeofday(&time_end, NULL);
@@ -703,180 +735,27 @@ int lcore_tx(void *arg) {
     return 0;
 }
 
-int lcore_rx_tx(void *arg) {
+int lcore_misc_rx_tx(void *arg) {
     unsigned int lcore_id = rte_lcore_id();
-    RTE_LOG(INFO, APP, "lcore_rx_tx run in lcore %u\n", lcore_id);
+    RTE_LOG(INFO, APP, "lcore_misc_rx_tx run in lcore %u\n", lcore_id);
 
-    uint64_t loop_times = 0;
-    struct timeval time_begin, time_end;
+    struct timeval time_now, time_old;
     while (!force_quit) {
-#ifdef DEBUG
-        loop_times++;
-        if (loop_times % (1000 * 1000 * 10) == 0) {
-            gettimeofday(&time_begin, NULL);
+        lcore_misc_loop();
+        bool have_rx_data = lcore_rx_loop();
+        bool have_tx_data = lcore_tx_loop();
+        if (!have_rx_data && !have_tx_data) {
+            usleep(1000 * 1);
         }
-#endif
-        // KNI回调处理
-        rte_kni_handle_request(kni);
-        // 这个太耗时了 改用插入kni内核模块时指定carrier=on参数实现
-//        update_kni_link_status(used_port_id);
-
-        // 环状缓冲区数据接收
-        uint8_t ring_recv_buf[BURST_SIZE][1514];
-        uint16_t ring_recv_buf_len[BURST_SIZE];
-        int ring_recv_size = 0;
-        for (int i = 0; i < BURST_SIZE; i++) {
-            read_send_mem(ring_recv_buf[i], &ring_recv_buf_len[i]);
-            if (unlikely(ring_recv_buf_len[i] == 0)) {
-                break;
-            }
-            ring_recv_size++;
+        gettimeofday(&time_now, NULL);
+        double cost_time = cost_time_ms(time_old, time_now);
+        if (cost_time >= 1000.0) {
+            gettimeofday(&time_old, NULL);
+            print_second_stats();
         }
-
-        // KNI数据接收
-        struct rte_mbuf *bufs_kni_recv[BURST_SIZE];
-        uint16_t nb_kni_rx = rte_kni_rx_burst(kni, bufs_kni_recv, BURST_SIZE);
-
-        // 接收多个网卡数据帧
-        struct rte_mbuf *bufs_recv[BURST_SIZE];
-        uint16_t nb_rx = rte_eth_rx_burst(used_port_id, 0, bufs_recv, BURST_SIZE);
-
-#ifdef IDEL_SLEEP
-        // 无包时短暂睡眠节省CPU资源
-        if (unlikely(nb_rx == 0) && unlikely(ring_recv_size == 0) && unlikely(nb_kni_rx == 0)) {
-            usleep(1000 * 100);
-            continue;
-        }
-#endif
-
-        // 有环状缓冲区数据
-        if (likely(ring_recv_size > 0)) {
-#ifdef DEBUG
-            // 打印环状缓冲区数据
-            for (int i = 0; i < ring_recv_size; i++) {
-                printf("ring recv len: %d, data: ", ring_recv_buf_len[i]);
-                for (int j = 0; j < ring_recv_buf_len[i]; j++) {
-                    printf("%02x ", ring_recv_buf[i][j]);
-                }
-                printf("\n\n");
-            }
-#endif
-
-            struct rte_mbuf *bufs_send[BURST_SIZE];
-
-            // 数据拷贝
-            for (int i = 0; i < ring_recv_size; i++) {
-                bufs_send[i] = rte_pktmbuf_alloc(mbuf_pool);
-                uint8_t *send_data = (uint8_t *) rte_pktmbuf_append(bufs_send[i],
-                                                                    ring_recv_buf_len[i] * sizeof(uint8_t));
-                memcpy(send_data, ring_recv_buf[i], ring_recv_buf_len[i]);
-            }
-
-            // 发送多个网卡数据帧
-            uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_send, ring_recv_size);
-
-            if (unlikely(nb_tx < ring_recv_size)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_tx; i < ring_recv_size; i++) {
-                    rte_pktmbuf_free(bufs_send[i]);
-                }
-            }
-        }
-
-        // 有KNI数据
-        if (likely(nb_kni_rx > 0)) {
-#ifdef DEBUG
-            // 打印KNI数据
-            for (int i = 0; i < nb_kni_rx; i++) {
-                printf("kni recv len: %d, data: ", bufs_kni_recv[i]->data_len);
-                for (int j = 0; j < bufs_kni_recv[i]->data_len; j++) {
-                    uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_kni_recv[i], uint8_t * );
-                    printf("%02x ", pktbuf[j]);
-                }
-                printf("\n\n");
-            }
-#endif
-            // 发送多个网卡数据帧
-            uint16_t nb_tx = rte_eth_tx_burst(used_port_id, 0, bufs_kni_recv, nb_kni_rx);
-            if (unlikely(nb_tx < nb_kni_rx)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_tx; i < nb_kni_rx; i++) {
-                    rte_pktmbuf_free(bufs_kni_recv[i]);
-                }
-            }
-        }
-
-        // 有网卡接收数据
-        if (likely(nb_rx != 0)) {
-            struct rte_mbuf *bufs_recv_to_kni[BURST_SIZE];
-            uint16_t nb_rx_to_kni = 0;
-            for (int i = 0; i < nb_rx; i++) {
-                uint8_t *pktbuf = rte_pktmbuf_mtod(bufs_recv[i], uint8_t * );
-#ifdef DEBUG
-                // 打印网卡接收到的原始数据
-                printf("interface recv, len: %d, data: ", bufs_recv[i]->data_len);
-                for (int j = 0; j < bufs_recv[i]->data_len; j++) {
-                    printf("%02x ", pktbuf[j]);
-                }
-                printf("\n\n");
-#endif
-#ifdef KNI_BYPASS_TCP_UDP
-                bool is_kni_data = false;
-                if (unlikely(bufs_recv[i]->data_len < 14)) {
-                    printf("error ether package\n");
-                    continue;
-                }
-                if (likely(pktbuf[12] == 0x08) && likely(pktbuf[13] == 0x00)) {
-                    // IP报文
-                    if (unlikely(bufs_recv[i]->data_len < 34)) {
-                        printf("error ip package\n");
-                        continue;
-                    }
-                    if (likely(pktbuf[23] == 0x06) || likely(pktbuf[23] == 0x11)) {
-                        // TCP或UDP报文
-                        // 环状缓冲区数据发送
-                        uint16_t ring_send_len = bufs_recv[i]->data_len;
-                        write_recv_mem(pktbuf, ring_send_len);
-                        rte_pktmbuf_free(bufs_recv[i]);
-                    } else {
-                        // 非TCP或UDP报文
-                        is_kni_data = true;
-                    }
-                } else {
-                    // 非IP报文
-                    is_kni_data = true;
-                }
-                if (unlikely(is_kni_data)) {
-                    // KNI数据
-                    bufs_recv_to_kni[nb_rx_to_kni] = bufs_recv[i];
-                    nb_rx_to_kni++;
-                }
-#else
-                // 环状缓冲区数据发送
-                uint16_t ring_send_len = bufs_recv[i]->data_len;
-                write_recv_mem(pktbuf, ring_send_len);
-                rte_pktmbuf_free(bufs_recv[i]);
-#endif
-            }
-            // KNI数据发送
-            uint16_t nb_kni_tx = rte_kni_tx_burst(kni, bufs_recv_to_kni, nb_rx_to_kni);
-            if (unlikely(nb_kni_tx < nb_rx_to_kni)) {
-                // 把没发送成功的mbuf释放掉
-                for (int i = nb_kni_tx; i < nb_rx_to_kni; i++) {
-                    rte_pktmbuf_free(bufs_recv_to_kni[i]);
-                }
-            }
-        }
-#ifdef DEBUG
-        if (loop_times % (1000 * 1000 * 10) == 0) {
-            gettimeofday(&time_end, NULL);
-            double cost_time = cost_time_ms(time_begin, time_end);
-            printf("total cost: %f ms\n", cost_time);
-        }
-#endif
     }
 
-    RTE_LOG(INFO, APP, "lcore_rx_tx exit in lcore %u\n", lcore_id);
+    RTE_LOG(INFO, APP, "lcore_misc_rx_tx exit in lcore %u\n", lcore_id);
     return 0;
 }
 
@@ -932,7 +811,8 @@ int dpdk_main(char *args) {
 
     argc--;
     argv++;
-    printf("test arg: %s\n", *argv);
+    kni_bypass_ip = inet_addr(*argv);
+    printf("kni bypass ip: %s, inet addr: %x\n", *argv, kni_bypass_ip);
 
     force_quit = false;
 
@@ -974,7 +854,7 @@ int dpdk_main(char *args) {
 
 #ifdef SINGLE_CORE
     // 单核心机器上无法启动多线程 暂时用主线程跑
-    lcore_rx_tx(NULL);
+    lcore_misc_rx_tx(NULL);
 #else
     // 线程核心绑定 循环处理数据包
     rte_eal_remote_launch(lcore_misc, NULL, 1);

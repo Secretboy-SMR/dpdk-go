@@ -5,9 +5,14 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strconv"
 	"time"
 	"unsafe"
 )
+
+// 确保CGO开启并添加以下环境变量
+// export CGO_CFLAGS_ALLOW=.*
+// export CGO_LDFLAGS_ALLOW=.*
 
 // #cgo CFLAGS: -I/root/dpdk-stable-18.11.11/x86_64-native-linuxapp-gcc/include -msse4.2
 // #cgo LDFLAGS: -L/root/dpdk-stable-18.11.11/x86_64-native-linuxapp-gcc/lib -Wl,--whole-archive -ldpdk -Wl,--no-whole-archive -ldl -pthread -lnuma -lm
@@ -16,6 +21,7 @@ import "C"
 
 const RING_BUFFER_SIZE uintptr = 134217728
 const DEBUG bool = false
+const IDLE_SLEEP bool = true
 
 var DPDK_RX_CHAN = make(chan []byte, 1048576)
 var DPDK_TX_CHAN = make(chan []byte, 1048576)
@@ -32,6 +38,16 @@ func Alloc() {
 	mem_recv_head = C.alloc_recv_mem()
 	recv_pos_pointer_addr = C.recv_pos_pointer_addr()
 	send_pos_pointer_addr = C.send_pos_pointer_addr()
+}
+
+var cpu_core_list []int = nil
+var mem_chan_num = 0
+var target_ip_addr = ""
+
+func Config(cpuCoreList []int, memChanNum int, targetIpAddr string) {
+	cpu_core_list = cpuCoreList
+	mem_chan_num = memChanNum
+	target_ip_addr = targetIpAddr
 }
 
 func Run() {
@@ -58,7 +74,6 @@ func Loopback() {
 		for {
 			read_recv_mem(pkt_rx_buf, &pkt_len)
 			if pkt_len == 0 {
-				// 单个CPU核心轮询
 				continue
 			}
 			pkt := pkt_rx_buf[:pkt_len]
@@ -77,10 +92,14 @@ func rx_pkt() {
 	for {
 		read_recv_mem(pkt_rx_buf, &pkt_len)
 		if pkt_len == 0 {
+			if IDLE_SLEEP {
+				time.Sleep(time.Millisecond * 1)
+			}
 			// 单个CPU核心轮询
 			continue
 		}
-		pkt := pkt_rx_buf[:pkt_len]
+		pkt := make([]uint8, pkt_len)
+		copy(pkt, pkt_rx_buf)
 		DPDK_RX_CHAN <- pkt
 		if DEBUG {
 			fmt.Printf("rx pkt, len: %v, data: %02x\n", pkt_len, pkt)
@@ -137,7 +156,14 @@ func build_cpp_main_args(argList []string) *C.char {
 }
 
 func run_dpdk() {
-	args := build_cpp_main_args([]string{os.Args[0], "-l", "0-3", "-n", "1", "--", "test_arg"})
+	cpuListParam := ""
+	for i, v := range cpu_core_list {
+		cpuListParam += strconv.Itoa(v)
+		if i != len(cpu_core_list)-1 {
+			cpuListParam += ","
+		}
+	}
+	args := build_cpp_main_args([]string{os.Args[0], "-l", cpuListParam, "-n", strconv.Itoa(mem_chan_num), "--", target_ip_addr})
 	C.dpdk_main(args)
 	C.free(unsafe.Pointer(args))
 }
