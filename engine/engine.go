@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -92,10 +91,10 @@ func PacketHandle() {
 	for {
 		select {
 		case ethFrm := <-dpdk.DPDK_RX_CHAN:
-			fmt.Printf("rx pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+			// fmt.Printf("rx pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
 			ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 			if err != nil {
-				fmt.Printf("parse ethernet frame error: %v\n", err)
+				// fmt.Printf("parse ethernet frame error: %v\n", err)
 				continue
 			}
 			if !bytes.Equal(ethDstMac, BROADCAST_MAC_ADDR) && !bytes.Equal(ethDstMac, LOCAL_MAC_ADDR) {
