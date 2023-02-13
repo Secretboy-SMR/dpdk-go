@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -10,17 +11,31 @@ import (
 	"github.com/FlourishingWorld/dpdk-go/protocol"
 )
 
-var BROADCAST_MAC_ADDR = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-var LOCAL_MAC_ADDR []byte = nil
-var LOCAL_IP_ADDR []byte = nil
-var NETWORK_MASK []byte = nil
-var GATEWAY_IP_ADDR []byte = nil
+var DEBUG = false
 
-var ARP_ENGINE *ArpEngine = nil
-var ICMP_ENGINE *IcmpEngine = nil
-var UDP_ENGINE *UdpEngine = nil
-var IPV4_ENGINE *Ipv4Engine = nil
-var TCP_ENGINE *TcpEngine = nil
+func EnableDebug() {
+	DEBUG = true
+}
+
+func DisableDebug() {
+	DEBUG = false
+}
+
+var (
+	BROADCAST_MAC_ADDR        = []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	LOCAL_MAC_ADDR     []byte = nil
+	LOCAL_IP_ADDR      []byte = nil
+	NETWORK_MASK       []byte = nil
+	GATEWAY_IP_ADDR    []byte = nil
+)
+
+var (
+	ARP_ENGINE  *ArpEngine  = nil
+	ICMP_ENGINE *IcmpEngine = nil
+	UDP_ENGINE  *UdpEngine  = nil
+	IPV4_ENGINE *Ipv4Engine = nil
+	TCP_ENGINE  *TcpEngine  = nil
+)
 
 func InitEngine(macAddr string, ipAddr string, networkMask string, gatewayIpAddr string) error {
 	// local mac
@@ -72,9 +87,9 @@ func InitEngine(macAddr string, ipAddr string, networkMask string, gatewayIpAddr
 	return nil
 }
 
-func RunEngine(cpuCoreList []int, memChanNum int, targetIpAddr string) {
+func RunEngine(cpuCoreList []int, golangRxCpuCore int, memChanNum int, targetIpAddr string) {
 	dpdk.Alloc()
-	dpdk.Config(cpuCoreList, memChanNum, targetIpAddr)
+	dpdk.Config(cpuCoreList, golangRxCpuCore, memChanNum, targetIpAddr)
 	dpdk.Run()
 	// 等待DPDK启动完成
 	time.Sleep(time.Second * 10)
@@ -91,10 +106,12 @@ func PacketHandle() {
 	for {
 		select {
 		case ethFrm := <-dpdk.DPDK_RX_CHAN:
-			// fmt.Printf("rx pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+			if DEBUG {
+				fmt.Printf("rx pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+			}
 			ethPayload, ethDstMac, ethSrcMac, ethProto, err := protocol.ParseEthFrm(ethFrm)
 			if err != nil {
-				// fmt.Printf("parse ethernet frame error: %v\n", err)
+				fmt.Printf("parse ethernet frame error: %v\n", err)
 				continue
 			}
 			if !bytes.Equal(ethDstMac, BROADCAST_MAC_ADDR) && !bytes.Equal(ethDstMac, LOCAL_MAC_ADDR) {

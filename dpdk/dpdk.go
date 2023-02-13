@@ -19,19 +19,25 @@ import (
 // #include "./cpp/dpdk.c"
 import "C"
 
-const RING_BUFFER_SIZE uintptr = 134217728
-const DEBUG bool = false
-const IDLE_SLEEP bool = false
+const (
+	RING_BUFFER_SIZE uintptr = 134217728
+	DEBUG            bool    = false
+	IDLE_SLEEP       bool    = false
+)
 
-var DPDK_RX_CHAN = make(chan []byte, 1048576)
-var DPDK_TX_CHAN = make(chan []byte, 1048576)
+var (
+	DPDK_RX_CHAN = make(chan []byte, 1048576)
+	DPDK_TX_CHAN = make(chan []byte, 1048576)
+)
 
-var mem_send_head unsafe.Pointer = nil
-var mem_send_cur unsafe.Pointer = nil
-var mem_recv_head unsafe.Pointer = nil
-var mem_recv_cur unsafe.Pointer = nil
-var recv_pos_pointer_addr *unsafe.Pointer = nil
-var send_pos_pointer_addr *unsafe.Pointer = nil
+var (
+	mem_send_head         unsafe.Pointer  = nil
+	mem_send_cur          unsafe.Pointer  = nil
+	mem_recv_head         unsafe.Pointer  = nil
+	mem_recv_cur          unsafe.Pointer  = nil
+	recv_pos_pointer_addr *unsafe.Pointer = nil
+	send_pos_pointer_addr *unsafe.Pointer = nil
+)
 
 func Alloc() {
 	mem_send_head = C.alloc_send_mem()
@@ -40,12 +46,16 @@ func Alloc() {
 	send_pos_pointer_addr = C.send_pos_pointer_addr()
 }
 
-var cpu_core_list []int = nil
-var mem_chan_num = 0
-var target_ip_addr = ""
+var (
+	cpu_core_list      []int = nil
+	golang_rx_cpu_core       = 0
+	mem_chan_num             = 0
+	target_ip_addr           = ""
+)
 
-func Config(cpuCoreList []int, memChanNum int, targetIpAddr string) {
+func Config(cpuCoreList []int, golangRxCpuCore int, memChanNum int, targetIpAddr string) {
 	cpu_core_list = cpuCoreList
+	golang_rx_cpu_core = golangRxCpuCore
 	mem_chan_num = memChanNum
 	target_ip_addr = targetIpAddr
 }
@@ -69,6 +79,8 @@ func Handle() {
 func Loopback() {
 	go func() {
 		runtime.LockOSThread()
+		ret := C.bind_cpu_core(C.int(golang_rx_cpu_core))
+		fmt.Printf("golang rx thread bind cpu core ret: %v\n", ret)
 		pkt_rx_buf := make([]uint8, 1514)
 		pkt_len := uint16(0)
 		for {
@@ -87,6 +99,8 @@ func Loopback() {
 
 func rx_pkt() {
 	runtime.LockOSThread()
+	ret := C.bind_cpu_core(C.int(golang_rx_cpu_core))
+	fmt.Printf("golang rx thread bind cpu core ret: %v\n", ret)
 	pkt_rx_buf := make([]uint8, 1514)
 	pkt_len := uint16(0)
 	for {

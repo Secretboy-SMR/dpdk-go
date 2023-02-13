@@ -18,7 +18,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	engine.RunEngine([]int{0, 1, 2, 3}, 1, "0.0.0.0")
+	engine.RunEngine([]int{0, 1, 2, 3}, 4, 1, "0.0.0.0")
 	// 等待基础驱动模块启动完成
 	time.Sleep(time.Second * 30)
 

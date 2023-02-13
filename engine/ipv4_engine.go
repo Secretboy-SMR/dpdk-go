@@ -59,6 +59,8 @@ func (i *Ipv4Engine) Tx(ipv4Payload []byte, ipv4HeadProto uint8, ipv4DstAddr []b
 		fmt.Printf("build ethernet frame error: %v\n", err)
 		return
 	}
-	// fmt.Printf("tx ip pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+	if DEBUG {
+		fmt.Printf("tx ip pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+	}
 	dpdk.DPDK_TX_CHAN <- ethFrm
 }

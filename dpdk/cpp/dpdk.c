@@ -1,3 +1,20 @@
+const char *VERSION = "2.0.0";
+
+#define _GNU_SOURCE
+
+#include <sched.h>
+#include <pthread.h>
+
+int bind_cpu_core(int core) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(core, &mask);
+    int ret = pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask);
+    return ret;
+}
+
+#undef _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -19,8 +36,6 @@
 #include <rte_mbuf.h>
 #include <rte_bus_pci.h>
 #include <rte_kni.h>
-
-const char *VERSION = "2.0.0";
 
 //#define DEBUG
 //#define SINGLE_CORE
@@ -581,9 +596,9 @@ bool lcore_rx_loop(void) {
             }
 #else
             // 环状缓冲区数据发送
-                uint16_t ring_send_len = bufs_recv[i]->data_len;
-                write_recv_mem(pktbuf, ring_send_len);
-                rte_pktmbuf_free(bufs_recv[i]);
+            uint16_t ring_send_len = bufs_recv[i]->data_len;
+            write_recv_mem(pktbuf, ring_send_len);
+            rte_pktmbuf_free(bufs_recv[i]);
 #endif
         }
         // KNI数据发送

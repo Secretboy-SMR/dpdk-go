@@ -49,7 +49,7 @@ func (a *ArpEngine) GetArpCache(ipAddr []byte) (macAddr []byte) {
 	macAddrUint64, exist := a.ArpCacheTable[ipAddrUint32]
 	a.ArpCacheTableLock.RUnlock()
 	if !exist {
-		// 不存在则发起arp询问并返回空
+		// 不存在则发起ARP询问并返回空
 		arpPkt, err := protocol.BuildArpPkt(protocol.ARP_REQUEST, LOCAL_MAC_ADDR, LOCAL_IP_ADDR, BROADCAST_MAC_ADDR, ipAddr)
 		if err != nil {
 			fmt.Printf("build arp packet error: %v\n", err)
@@ -60,7 +60,9 @@ func (a *ArpEngine) GetArpCache(ipAddr []byte) (macAddr []byte) {
 			fmt.Printf("build ethernet frame error: %v\n", err)
 			return
 		}
-		fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+		if DEBUG {
+			fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+		}
 		dpdk.DPDK_TX_CHAN <- ethFrm
 		return nil
 	}
@@ -99,7 +101,9 @@ func (a *ArpEngine) Handle(ethPayload []byte, ethSrcMac []byte) {
 			fmt.Printf("build ethernet frame error: %v\n", err)
 			return
 		}
-		fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+		if DEBUG {
+			fmt.Printf("tx arp pkt, eth frm len: %v, eth frm data: %v\n", len(ethFrm), ethFrm)
+		}
 		dpdk.DPDK_TX_CHAN <- ethFrm
 	}
 }
