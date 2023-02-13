@@ -23,9 +23,9 @@
 const char *VERSION = "2.0.0";
 
 //#define DEBUG
-#define SINGLE_CORE
-#define IDLE_SLEEP
-#define KNI_BYPASS_TARGET_IP
+//#define SINGLE_CORE
+//#define IDLE_SLEEP
+//#define KNI_BYPASS_TARGET_IP
 
 #define RING_BUFFER_SIZE 134217728
 

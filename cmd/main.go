@@ -82,7 +82,7 @@ func KcpServer() {
 
 func KcpClient() {
 	go func() {
-		conn, err := kcp.DialWithOptions("192.168.199.199:22222")
+		conn, err := kcp.DialWithOptions("192.168.199.199:22222", "0.0.0.0:30000")
 		if err != nil {
 			panic(err)
 		}

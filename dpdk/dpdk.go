@@ -21,7 +21,7 @@ import "C"
 
 const RING_BUFFER_SIZE uintptr = 134217728
 const DEBUG bool = false
-const IDLE_SLEEP bool = true
+const IDLE_SLEEP bool = false
 
 var DPDK_RX_CHAN = make(chan []byte, 1048576)
 var DPDK_TX_CHAN = make(chan []byte, 1048576)

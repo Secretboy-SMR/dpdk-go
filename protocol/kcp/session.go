@@ -796,14 +796,14 @@ func serveConn(conn *UDPConn) (*Listener, error) {
 }
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp"
-func DialWithOptions(raddr string) (*UDPSession, error) {
+func DialWithOptions(raddr string, laddr string) (*UDPSession, error) {
 	// network type detection
 	udpaddr, err := ResolveUDPAddr(raddr)
 	if err != nil {
 		return nil, err
 	}
 
-	localUdpAddr, err := ResolveUDPAddr("0.0.0.0:30000")
+	localUdpAddr, err := ResolveUDPAddr(laddr)
 	if err != nil {
 		return nil, err
 	}
